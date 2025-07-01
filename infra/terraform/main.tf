@@ -1,3 +1,7 @@
+resource "random_id" "random_id" {
+  byte_length = 4
+}
+
 # VPC Configuration
 module "vpc" {
   source                = "./modules/vpc/vpc"
@@ -113,7 +117,7 @@ module "private_rt" {
 # Cognito User Pool
 module "cognito" {
   source                     = "./modules/cognito"
-  name                       = "document_analyzer_users"
+  name                       = "document-analyzer-users"
   username_attributes        = ["email"]
   auto_verified_attributes   = ["email"]
   password_minimum_length    = 8
@@ -202,7 +206,7 @@ module "document_upload_queue" {
 # Document Storage Bucket
 module "document_storage_bucket" {
   source             = "./modules/s3"
-  bucket_name        = "document-storage-${var.environment}"
+  bucket_name        = "document-storage-${random_id.random_id.hex}"
   objects            = []
   versioning_enabled = "Enabled"
   bucket_notification = {
@@ -224,8 +228,184 @@ module "document_storage_bucket" {
   ]
   force_destroy = true
 }
+# Document Analyzer Lambda Function
+module "documentanalyzer_function_code_bucket" {
+  source      = "./modules/s3"
+  bucket_name = "documentanalyzerfunctioncode"
+  objects = [
+    {
+      key    = "documentanalyzer_function.zip"
+      source = "./files/documentanalyzer_function.zip"
+    }
+  ]
+  versioning_enabled = "Enabled"
+  cors = [
+    {
+      allowed_headers = ["*"]
+      allowed_methods = ["PUT", "POST", "GET"]
+      allowed_origins = ["*"]
+      max_age_seconds = 3000
+    }
+  ]
+  force_destroy = true
+}
+module "documentanalyzer_get_presigned_url_function_code_bucket" {
+  source      = "./modules/s3"
+  bucket_name = "documentanalyzergetpresignedurlfunctioncode"
+  objects = [
+    {
+      key    = "get_presigned_url.zip"
+      source = "./files/get_presigned_url.zip"
+    }
+  ]
+  versioning_enabled = "Enabled"
+  cors = [
+    {
+      allowed_headers = ["*"]
+      allowed_methods = ["PUT", "POST", "GET"]
+      allowed_origins = ["*"]
+      max_age_seconds = 3000
+    }
+  ]
+  force_destroy = true
+}
+
+module "documentanalyzer_get_records_function_code_bucket" {
+  source      = "./modules/s3"
+  bucket_name = "documentanalyzergetrecordsfunctioncode"
+  objects = [
+    {
+      key    = "get_records.zip"
+      source = "./files/get_records.zip"
+    }
+  ]
+  versioning_enabled = "Enabled"
+  cors = [
+    {
+      allowed_headers = ["*"]
+      allowed_methods = ["PUT", "POST", "GET"]
+      allowed_origins = ["*"]
+      max_age_seconds = 3000
+    }
+  ]
+  force_destroy = true
+}
+
+# Lambda function IAM Role
+module "documentanalyzer_function_iam_role" {
+  source             = "./modules/iam"
+  role_name          = "documentanalyzer_function_iam_role"
+  role_description   = "documentanalyzer_function_iam_role"
+  policy_name        = "documentanalyzer_function_iam_policy"
+  policy_description = "documentanalyzer_function_iam_policy"
+  assume_role_policy = <<EOF
+    {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Action": "sts:AssumeRole",
+                "Principal": {
+                  "Service": "lambda.amazonaws.com"
+                },
+                "Effect": "Allow",
+                "Sid": ""
+            }
+        ]
+    }
+    EOF
+  policy             = <<EOF
+    {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+            "Action": [
+              "logs:CreateLogGroup",
+              "logs:CreateLogStream",
+              "logs:PutLogEvents"
+            ],
+            "Resource": "arn:aws:logs:*:*:*",
+            "Effect": "Allow"
+        }
+      ]
+    }
+    EOF
+}
+
+module "documentanalyzer_lambda_function" {
+  source        = "./modules/lambda"
+  function_name = "documentanalyzer-lambda-function"
+  role_arn      = module.documentanalyzer_function_iam_role.arn
+  env_variables = {
+    REGION = var.region
+  }
+  handler    = "documentanalyzer_function.lambda_handler"
+  runtime    = "python3.12"
+  s3_bucket  = module.documentanalyzer_function_code_bucket.bucket
+  s3_key     = "documentanalyzer_function.zip"
+  depends_on = [module.documentanalyzer_function_code_bucket]
+}
+
+# Lambda function to get presigned url
+module "documentanalyzer_get_presigned_url_function" {
+  source        = "./modules/lambda"
+  function_name = "documentanalyzer-get-presigned-url-function"
+  role_arn      = module.documentanalyzer_function_iam_role.arn
+  env_variables = {
+    REGION = var.region
+  }
+  permissions = [
+    {
+      statement_id = "InvokeGetPresignedUrl"
+      action       = "lambda:InvokeFunction"
+      principal    = "apigateway.amazonaws.com"
+      source_arn   = "${aws_api_gateway_rest_api.documentanalyzer_rest_api.execution_arn}/*/*/get-presigned-url"
+    }
+  ]
+  handler    = "get_presigned_url.lambda_handler"
+  runtime    = "python3.12"
+  s3_bucket  = module.documentanalyzer_get_presigned_url_function_code_bucket.bucket
+  s3_key     = "get_presigned_url.zip"
+  depends_on = [module.documentanalyzer_get_presigned_url_function_code_bucket]
+}
+
+# Lambda function to get processed records from DynamoDB
+module "documentanalyzer_get_records_function" {
+  source        = "./modules/lambda"
+  function_name = "documentanalyzer-get-records-function"
+  role_arn      = module.documentanalyzer_function_iam_role.arn
+  env_variables = {
+    REGION = var.region
+  }
+  permissions = [
+    {
+      statement_id = "InvokeGetRecords"
+      action       = "lambda:InvokeFunction"
+      principal    = "apigateway.amazonaws.com"
+      source_arn   = "${aws_api_gateway_rest_api.documentanalyzer_rest_api.execution_arn}/*/*/get-records"
+    }
+  ]
+  handler    = "get_records.lambda_handler"
+  runtime    = "python3.12"
+  s3_bucket  = module.documentanalyzer_get_records_function_code_bucket.bucket
+  s3_key     = "get_records.zip"
+  depends_on = [module.documentanalyzer_get_records_function_code_bucket]
+}
 
 # EC2 IAM Instance Profile
+data "aws_ami" "ubuntu" {
+  most_recent = true
+  owners      = ["amazon"]
+  filter {
+    name   = "name"
+    values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-*"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+}
+
 data "aws_iam_policy_document" "instance_profile_assume_role" {
   statement {
     effect = "Allow"
@@ -249,7 +429,7 @@ data "aws_iam_policy_document" "instance_profile_policy_document" {
   statement {
     effect    = "Allow"
     actions   = ["s3:*"]
-    resources = ["${module.mediaconvert_source_bucket.arn}/*"]
+    resources = ["${module.document_storage_bucket.arn}/*"]
   }
   statement {
     effect    = "Allow"
@@ -285,15 +465,15 @@ module "document_analyzer_frontend_instance" {
 #  Lambda SQS event source mapping
 resource "aws_lambda_event_source_mapping" "sqs_event_trigger" {
   event_source_arn                   = module.document_upload_queue.arn
-  function_name                      = module.mediaconvert_lambda_function.arn
+  function_name                      = module.documentanalyzer_lambda_function.arn
   enabled                            = true
   batch_size                         = 10
   maximum_batching_window_in_seconds = 60
 }
 
 # API Gateway configuration
-resource "aws_api_gateway_rest_api" "mediaconvert_rest_api" {
-  name = "mediaconvert-api"
+resource "aws_api_gateway_rest_api" "documentanalyzer_rest_api" {
+  name = "documentanalyzer-api"
   endpoint_configuration {
     types = ["REGIONAL"]
   }
@@ -301,107 +481,107 @@ resource "aws_api_gateway_rest_api" "mediaconvert_rest_api" {
 
 # Authorizer Resource
 # resource "aws_api_gateway_authorizer" "cognito_authorizer" {
-#   name            = "mediaconvert-cognito-authorizer"
-#   rest_api_id     = aws_api_gateway_rest_api.mediaconvert_rest_api.id
-#   authorizer_uri  = module.mediaconvert_api_authorizer_function.invoke_arn
+#   name            = "documentanalyzer-cognito-authorizer"
+#   rest_api_id     = aws_api_gateway_rest_api.documentanalyzer_rest_api.id
+#   authorizer_uri  = module.documentanalyzer_api_authorizer_function.invoke_arn
 #   identity_source = "method.request.header.Authorization"
 #   type            = "REQUEST"
 # }
 
-resource "aws_api_gateway_resource" "mediaconvert_resource_api" {
-  rest_api_id = aws_api_gateway_rest_api.mediaconvert_rest_api.id
-  parent_id   = aws_api_gateway_rest_api.mediaconvert_rest_api.root_resource_id
+resource "aws_api_gateway_resource" "documentanalyzer_resource_api" {
+  rest_api_id = aws_api_gateway_rest_api.documentanalyzer_rest_api.id
+  parent_id   = aws_api_gateway_rest_api.documentanalyzer_rest_api.root_resource_id
   path_part   = "get-presigned-url"
 }
 
-resource "aws_api_gateway_method" "mediaconvert_resource_api_get_presigned_url_method" {
-  rest_api_id      = aws_api_gateway_rest_api.mediaconvert_rest_api.id
-  resource_id      = aws_api_gateway_resource.mediaconvert_resource_api.id
+resource "aws_api_gateway_method" "documentanalyzer_resource_api_get_presigned_url_method" {
+  rest_api_id      = aws_api_gateway_rest_api.documentanalyzer_rest_api.id
+  resource_id      = aws_api_gateway_resource.documentanalyzer_resource_api.id
   api_key_required = false
   http_method      = "ANY"
   authorization    = "NONE"
   # authorizer_id    = aws_api_gateway_authorizer.cognito_authorizer.id
 }
 
-resource "aws_api_gateway_integration" "mediaconvert_resource_api_get_presigned_url_method_integration" {
-  rest_api_id             = aws_api_gateway_rest_api.mediaconvert_rest_api.id
-  resource_id             = aws_api_gateway_resource.mediaconvert_resource_api.id
-  http_method             = aws_api_gateway_method.mediaconvert_resource_api_get_presigned_url_method.http_method
+resource "aws_api_gateway_integration" "documentanalyzer_resource_api_get_presigned_url_method_integration" {
+  rest_api_id             = aws_api_gateway_rest_api.documentanalyzer_rest_api.id
+  resource_id             = aws_api_gateway_resource.documentanalyzer_resource_api.id
+  http_method             = aws_api_gateway_method.documentanalyzer_resource_api_get_presigned_url_method.http_method
   integration_http_method = "ANY"
   type                    = "AWS_PROXY"
-  uri                     = module.mediaconvert_get_presigned_url_function.invoke_arn
+  uri                     = module.documentanalyzer_get_presigned_url_function.invoke_arn
 }
 
 resource "aws_api_gateway_method_response" "get_presigned_url_method_response_200" {
-  rest_api_id = aws_api_gateway_rest_api.mediaconvert_rest_api.id
-  resource_id = aws_api_gateway_resource.mediaconvert_resource_api.id
-  http_method = aws_api_gateway_method.mediaconvert_resource_api_get_presigned_url_method.http_method
+  rest_api_id = aws_api_gateway_rest_api.documentanalyzer_rest_api.id
+  resource_id = aws_api_gateway_resource.documentanalyzer_resource_api.id
+  http_method = aws_api_gateway_method.documentanalyzer_resource_api_get_presigned_url_method.http_method
   status_code = "200"
 }
 
 resource "aws_api_gateway_integration_response" "get_presigned_url_integration_response_200" {
-  rest_api_id = aws_api_gateway_rest_api.mediaconvert_rest_api.id
-  resource_id = aws_api_gateway_resource.mediaconvert_resource_api.id
-  http_method = aws_api_gateway_method.mediaconvert_resource_api_get_presigned_url_method.http_method
+  rest_api_id = aws_api_gateway_rest_api.documentanalyzer_rest_api.id
+  resource_id = aws_api_gateway_resource.documentanalyzer_resource_api.id
+  http_method = aws_api_gateway_method.documentanalyzer_resource_api_get_presigned_url_method.http_method
   status_code = aws_api_gateway_method_response.get_presigned_url_method_response_200.status_code
   depends_on = [
-    aws_api_gateway_integration.mediaconvert_resource_api_get_presigned_url_method_integration
+    aws_api_gateway_integration.documentanalyzer_resource_api_get_presigned_url_method_integration
   ]
 }
 
 # ---------------------------------------------------------------------------------------------------
 
-resource "aws_api_gateway_resource" "mediaconvert_get_records_api" {
-  rest_api_id = aws_api_gateway_rest_api.mediaconvert_rest_api.id
-  parent_id   = aws_api_gateway_rest_api.mediaconvert_rest_api.root_resource_id
+resource "aws_api_gateway_resource" "documentanalyzer_get_records_api" {
+  rest_api_id = aws_api_gateway_rest_api.documentanalyzer_rest_api.id
+  parent_id   = aws_api_gateway_rest_api.documentanalyzer_rest_api.root_resource_id
   path_part   = "get-records"
 }
 
-resource "aws_api_gateway_method" "mediaconvert_resource_api_get_records_method" {
-  rest_api_id      = aws_api_gateway_rest_api.mediaconvert_rest_api.id
-  resource_id      = aws_api_gateway_resource.mediaconvert_get_records_api.id
+resource "aws_api_gateway_method" "documentanalyzer_resource_api_get_records_method" {
+  rest_api_id      = aws_api_gateway_rest_api.documentanalyzer_rest_api.id
+  resource_id      = aws_api_gateway_resource.documentanalyzer_get_records_api.id
   api_key_required = false
   http_method      = "ANY"
   authorization    = "NONE"
   # authorizer_id    = aws_api_gateway_authorizer.cognito_authorizer.id
 }
 
-resource "aws_api_gateway_integration" "mediaconvert_resource_api_get_records_method_integration" {
-  rest_api_id             = aws_api_gateway_rest_api.mediaconvert_rest_api.id
-  resource_id             = aws_api_gateway_resource.mediaconvert_get_records_api.id
-  http_method             = aws_api_gateway_method.mediaconvert_resource_api_get_records_method.http_method
+resource "aws_api_gateway_integration" "documentanalyzer_resource_api_get_records_method_integration" {
+  rest_api_id             = aws_api_gateway_rest_api.documentanalyzer_rest_api.id
+  resource_id             = aws_api_gateway_resource.documentanalyzer_get_records_api.id
+  http_method             = aws_api_gateway_method.documentanalyzer_resource_api_get_records_method.http_method
   integration_http_method = "ANY"
   type                    = "AWS_PROXY"
-  uri                     = module.mediaconvert_get_records_function.invoke_arn
+  uri                     = module.documentanalyzer_get_records_function.invoke_arn
 }
 
 resource "aws_api_gateway_method_response" "get_records_method_response_200" {
-  rest_api_id = aws_api_gateway_rest_api.mediaconvert_rest_api.id
-  resource_id = aws_api_gateway_resource.mediaconvert_get_records_api.id
-  http_method = aws_api_gateway_method.mediaconvert_resource_api_get_records_method.http_method
+  rest_api_id = aws_api_gateway_rest_api.documentanalyzer_rest_api.id
+  resource_id = aws_api_gateway_resource.documentanalyzer_get_records_api.id
+  http_method = aws_api_gateway_method.documentanalyzer_resource_api_get_records_method.http_method
   status_code = "200"
 }
 
 resource "aws_api_gateway_integration_response" "get_records_integration_response_200" {
-  rest_api_id = aws_api_gateway_rest_api.mediaconvert_rest_api.id
-  resource_id = aws_api_gateway_resource.mediaconvert_get_records_api.id
-  http_method = aws_api_gateway_method.mediaconvert_resource_api_get_records_method.http_method
+  rest_api_id = aws_api_gateway_rest_api.documentanalyzer_rest_api.id
+  resource_id = aws_api_gateway_resource.documentanalyzer_get_records_api.id
+  http_method = aws_api_gateway_method.documentanalyzer_resource_api_get_records_method.http_method
   status_code = aws_api_gateway_method_response.get_records_method_response_200.status_code
   depends_on = [
-    aws_api_gateway_integration.mediaconvert_resource_api_get_records_method_integration
+    aws_api_gateway_integration.documentanalyzer_resource_api_get_records_method_integration
   ]
 }
 
-resource "aws_api_gateway_deployment" "mediaconvert_api_deployment" {
-  rest_api_id = aws_api_gateway_rest_api.mediaconvert_rest_api.id
+resource "aws_api_gateway_deployment" "documentanalyzer_api_deployment" {
+  rest_api_id = aws_api_gateway_rest_api.documentanalyzer_rest_api.id
   lifecycle {
     create_before_destroy = true
   }
-  depends_on = [aws_api_gateway_integration.mediaconvert_resource_api_get_presigned_url_method_integration, aws_api_gateway_integration.mediaconvert_resource_api_get_records_method_integration]
+  depends_on = [aws_api_gateway_integration.documentanalyzer_resource_api_get_presigned_url_method_integration, aws_api_gateway_integration.documentanalyzer_resource_api_get_records_method_integration]
 }
 
-resource "aws_api_gateway_stage" "mediaconvert_api_stage" {
-  deployment_id = aws_api_gateway_deployment.mediaconvert_api_deployment.id
-  rest_api_id   = aws_api_gateway_rest_api.mediaconvert_rest_api.id
+resource "aws_api_gateway_stage" "documentanalyzer_api_stage" {
+  deployment_id = aws_api_gateway_deployment.documentanalyzer_api_deployment.id
+  rest_api_id   = aws_api_gateway_rest_api.documentanalyzer_rest_api.id
   stage_name    = "dev"
 }
