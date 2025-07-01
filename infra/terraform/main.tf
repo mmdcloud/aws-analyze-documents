@@ -281,3 +281,127 @@ module "document_analyzer_frontend_instance" {
   subnet_id                   = module.public_subnets.subnets[0].id
   security_groups             = [module.security_group.id]
 }
+
+#  Lambda SQS event source mapping
+resource "aws_lambda_event_source_mapping" "sqs_event_trigger" {
+  event_source_arn                   = module.document_upload_queue.arn
+  function_name                      = module.mediaconvert_lambda_function.arn
+  enabled                            = true
+  batch_size                         = 10
+  maximum_batching_window_in_seconds = 60
+}
+
+# API Gateway configuration
+resource "aws_api_gateway_rest_api" "mediaconvert_rest_api" {
+  name = "mediaconvert-api"
+  endpoint_configuration {
+    types = ["REGIONAL"]
+  }
+}
+
+# Authorizer Resource
+# resource "aws_api_gateway_authorizer" "cognito_authorizer" {
+#   name            = "mediaconvert-cognito-authorizer"
+#   rest_api_id     = aws_api_gateway_rest_api.mediaconvert_rest_api.id
+#   authorizer_uri  = module.mediaconvert_api_authorizer_function.invoke_arn
+#   identity_source = "method.request.header.Authorization"
+#   type            = "REQUEST"
+# }
+
+resource "aws_api_gateway_resource" "mediaconvert_resource_api" {
+  rest_api_id = aws_api_gateway_rest_api.mediaconvert_rest_api.id
+  parent_id   = aws_api_gateway_rest_api.mediaconvert_rest_api.root_resource_id
+  path_part   = "get-presigned-url"
+}
+
+resource "aws_api_gateway_method" "mediaconvert_resource_api_get_presigned_url_method" {
+  rest_api_id      = aws_api_gateway_rest_api.mediaconvert_rest_api.id
+  resource_id      = aws_api_gateway_resource.mediaconvert_resource_api.id
+  api_key_required = false
+  http_method      = "ANY"
+  authorization    = "NONE"
+  # authorizer_id    = aws_api_gateway_authorizer.cognito_authorizer.id
+}
+
+resource "aws_api_gateway_integration" "mediaconvert_resource_api_get_presigned_url_method_integration" {
+  rest_api_id             = aws_api_gateway_rest_api.mediaconvert_rest_api.id
+  resource_id             = aws_api_gateway_resource.mediaconvert_resource_api.id
+  http_method             = aws_api_gateway_method.mediaconvert_resource_api_get_presigned_url_method.http_method
+  integration_http_method = "ANY"
+  type                    = "AWS_PROXY"
+  uri                     = module.mediaconvert_get_presigned_url_function.invoke_arn
+}
+
+resource "aws_api_gateway_method_response" "get_presigned_url_method_response_200" {
+  rest_api_id = aws_api_gateway_rest_api.mediaconvert_rest_api.id
+  resource_id = aws_api_gateway_resource.mediaconvert_resource_api.id
+  http_method = aws_api_gateway_method.mediaconvert_resource_api_get_presigned_url_method.http_method
+  status_code = "200"
+}
+
+resource "aws_api_gateway_integration_response" "get_presigned_url_integration_response_200" {
+  rest_api_id = aws_api_gateway_rest_api.mediaconvert_rest_api.id
+  resource_id = aws_api_gateway_resource.mediaconvert_resource_api.id
+  http_method = aws_api_gateway_method.mediaconvert_resource_api_get_presigned_url_method.http_method
+  status_code = aws_api_gateway_method_response.get_presigned_url_method_response_200.status_code
+  depends_on = [
+    aws_api_gateway_integration.mediaconvert_resource_api_get_presigned_url_method_integration
+  ]
+}
+
+# ---------------------------------------------------------------------------------------------------
+
+resource "aws_api_gateway_resource" "mediaconvert_get_records_api" {
+  rest_api_id = aws_api_gateway_rest_api.mediaconvert_rest_api.id
+  parent_id   = aws_api_gateway_rest_api.mediaconvert_rest_api.root_resource_id
+  path_part   = "get-records"
+}
+
+resource "aws_api_gateway_method" "mediaconvert_resource_api_get_records_method" {
+  rest_api_id      = aws_api_gateway_rest_api.mediaconvert_rest_api.id
+  resource_id      = aws_api_gateway_resource.mediaconvert_get_records_api.id
+  api_key_required = false
+  http_method      = "ANY"
+  authorization    = "NONE"
+  # authorizer_id    = aws_api_gateway_authorizer.cognito_authorizer.id
+}
+
+resource "aws_api_gateway_integration" "mediaconvert_resource_api_get_records_method_integration" {
+  rest_api_id             = aws_api_gateway_rest_api.mediaconvert_rest_api.id
+  resource_id             = aws_api_gateway_resource.mediaconvert_get_records_api.id
+  http_method             = aws_api_gateway_method.mediaconvert_resource_api_get_records_method.http_method
+  integration_http_method = "ANY"
+  type                    = "AWS_PROXY"
+  uri                     = module.mediaconvert_get_records_function.invoke_arn
+}
+
+resource "aws_api_gateway_method_response" "get_records_method_response_200" {
+  rest_api_id = aws_api_gateway_rest_api.mediaconvert_rest_api.id
+  resource_id = aws_api_gateway_resource.mediaconvert_get_records_api.id
+  http_method = aws_api_gateway_method.mediaconvert_resource_api_get_records_method.http_method
+  status_code = "200"
+}
+
+resource "aws_api_gateway_integration_response" "get_records_integration_response_200" {
+  rest_api_id = aws_api_gateway_rest_api.mediaconvert_rest_api.id
+  resource_id = aws_api_gateway_resource.mediaconvert_get_records_api.id
+  http_method = aws_api_gateway_method.mediaconvert_resource_api_get_records_method.http_method
+  status_code = aws_api_gateway_method_response.get_records_method_response_200.status_code
+  depends_on = [
+    aws_api_gateway_integration.mediaconvert_resource_api_get_records_method_integration
+  ]
+}
+
+resource "aws_api_gateway_deployment" "mediaconvert_api_deployment" {
+  rest_api_id = aws_api_gateway_rest_api.mediaconvert_rest_api.id
+  lifecycle {
+    create_before_destroy = true
+  }
+  depends_on = [aws_api_gateway_integration.mediaconvert_resource_api_get_presigned_url_method_integration, aws_api_gateway_integration.mediaconvert_resource_api_get_records_method_integration]
+}
+
+resource "aws_api_gateway_stage" "mediaconvert_api_stage" {
+  deployment_id = aws_api_gateway_deployment.mediaconvert_api_deployment.id
+  rest_api_id   = aws_api_gateway_rest_api.mediaconvert_rest_api.id
+  stage_name    = "dev"
+}
