@@ -14,7 +14,6 @@ function App() {
     loading: false
   });
 
-  // Check for existing session on app load
   useEffect(() => {
     const savedUser = localStorage.getItem('user');
     if (savedUser) {
